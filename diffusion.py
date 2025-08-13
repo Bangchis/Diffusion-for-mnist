@@ -407,23 +407,90 @@ class GaussianDiffusion(nn.Module):
         return self.unnormalize(img), frames_xt, frames_x0
 
     @torch.no_grad()
-    def forward_noising_trajectory(self, x0, t_values):
+    def forward_noising_trajectory(self, x0, t_values, *, return_xt_last=False):
         """
-        Visualize forward diffusion q(x_t | x_0) at selected t.
+        Create a forward (noising) trajectory for visualization: x0 -> ... -> x_T.
+
         Args:
-            x0: clean images in [0,1], [B,C,H,W]
-            t_values: list/iterable of ints (0..T-1)
+            x0 (Tensor): clean images in [0,1], shape [B,C,H,W] (from DataLoader).
+            t_values (Iterable[int]): list of discrete times (0..T-1) you want to record.
+                                    Example: [0, 10, 20, 40, 80, 160, 320, 399]
+            return_xt_last (bool): if True, also returns the exact x_T used for the
+                                last time in t_values (in [-1,1]), so you can feed
+                                it to reverse_from_xt_trajectory for a perfectly
+                                matched reverse video.
 
         Returns:
-            frames_xt: list of tensors in [0,1], each [B,C,H,W]
+            frames (List[Tensor]): each element is [B,C,H,W] in [0,1]
+            (optional) xt_last (Tensor): the last noisy batch in [-1,1], shape [B,C,H,W]
+                                        ONLY if return_xt_last=True
         """
-        # normalize like training path
-        x0n = self.normalize(x0.to(self.device))
+        # ---- 1) Validate inputs ----
+        assert x0.ndim == 4, f"x0 must be [B,C,H,W], got {x0.shape}"
+        B, C, H, W = x0.shape
+        assert C == self.channels, f"channel mismatch: x0 has {C}, model has {self.channels}"
+        T = self.num_timesteps
+
+        # sanitize t_values: ints, clipped to [0, T-1], unique & sorted (increasing noise)
+        t_list = sorted({int(max(0, min(T - 1, int(t)))) for t in t_values})
+        if len(t_list) == 0:
+            return [] if not return_xt_last else ([], None)
+
+        # ---- 2) Move & normalize once ----
+        x0 = x0.to(device=self.device, dtype=next(
+            self.model.parameters()).dtype)
+        x0n = self.normalize(x0)  # [0,1] -> [-1,1]
+
+        # ---- 3) Use ONE fixed epsilon for the whole batch so the path is smooth ----
+        # This makes frames for different t lie on the same noise direction,
+        # i.e., xt = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*epsilon
+        eps = torch.randn_like(x0n)
+
         frames = []
-        for t in t_values:
-            tt = torch.full((x0n.size(0),), int(
-                t), device=self.device, dtype=torch.long)
-            xt = self.q_sample(x0n, tt)               # in [-1,1] domain
-            # map back to [0,1] for viewing
-            frames.append(self.unnormalize(xt))
+        xt_last = None
+
+        # ---- 4) Produce frames at requested times ----
+        for t in t_list:
+            tt = torch.full((B,), t, device=self.device, dtype=torch.long)
+
+            # equivalent to: xt = sqrt(alpha_bar_t)*x0n + sqrt(1-alpha_bar_t)*eps
+            # using the SAME eps for all t (smooth trajectory)
+            xt = (
+                self.sqrt_alphas_cumprod.index_select(0, tt)
+                .reshape(B, 1, 1, 1) * x0n
+                +
+                self.sqrt_one_minus_alphas_cumprod.index_select(0, tt)
+                .reshape(B, 1, 1, 1) * eps
+            )
+
+            # store a viewable frame in [0,1]
+            frames.append(self.unnormalize(xt.clamp(-1, 1)))
+
+            xt_last = xt  # keep the last noisy batch we produced
+
+        # ---- 5) Return frames (and optionally the exact last xt in [-1,1]) ----
+        if return_xt_last:
+            return frames, xt_last
+        return frames
+
+    @torch.inference_mode()
+    def reverse_from_xt_trajectory(self, x_t, t_start=None, record_every=50):
+        if t_start is None:
+            t_start = self.num_timesteps - 1
+
+        img = x_t.clone()            # x_t ở miền [-1,1]
+        frames = []
+        x0 = None
+
+        for t in reversed(range(t_start + 1)):  # t_start, ..., 0
+            # Ghi lại x_t hiện tại (chưa bước) để thấy diễn tiến mượt
+            if t == t_start or t == 0 or (t % record_every) == 0:
+                frames.append(self.unnormalize(
+                    img.clamp(-1, 1)))  # [0,1] để xem
+
+            self_cond = x0 if self.self_condition else None
+            img, x0 = self.p_sample(img, t, self_cond)  # 1 bước DDPM
+
+        # Đảm bảo khung cuối là x_0
+        frames.append(self.unnormalize(img.clamp(-1, 1)))
         return frames

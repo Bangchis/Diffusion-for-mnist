@@ -1,24 +1,26 @@
 # Use PyTorch CUDA 12.1 wheels for torch/torchvision
 --index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1
-torchvision==0.18.1
+torch
+torchvision
 
 # Core utils
-pyyaml>=6.0.1
-tqdm>=4.66.0
-numpy>=1.26.0
-Pillow>=10.0.0
-einops>=0.7.0
+pyyaml
+tqdm
+numpy
+Pillow
+einops
 
 
 # Logging & videos
-wandb>=0.16.0
-imageio>=2.31.0
-imageio-ffmpeg>=0.4.9   # để ghi MP4 mà không cần ffmpeg hệ thống
+wandb
+imageio
+imageio-ffmpeg  # để ghi MP4 mà không cần ffmpeg hệ thống
 
 # Metrics (nếu bật FID/IS)
-clean-fid>=0.1.35
-torch-fidelity>=0.3.0
+clean-fid
+torch-fidelity
 
 # (Tùy chọn) Đẩy model lên Hugging Face
-huggingface_hub>=0.23.0
+huggingface_hub
+
+#/usr/bin/python3 train_mnist.py --config config_mnist_small.yaml

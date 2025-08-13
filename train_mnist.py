@@ -351,24 +351,8 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
                 diffusion.eval()
                 with torch.inference_mode():
                     sampler = ema.ema_model if ema is not None else diffusion
-                    t0 = time.perf_counter()
-                    samples = sampler.sample(cfg["diffusion"]["sample_n"])
-                    t1 = time.perf_counter()
-                    path = f"./samples/mnist_step_{step}.png"
-                    save_image(samples, path, nrow=8)
 
-                    # sampling speed: imgs/sec for this batch
-                    dt = max(t1 - t0, 1e-6)
-                    imgs_per_sec = cfg["diffusion"]["sample_n"] / dt
-
-                    if run:
-                        wandb.log({
-                            "samples_grid": wandb.Image(path),
-                            "speed/sampling_imgs_per_sec": imgs_per_sec,
-                            "speed/sampling_sec": dt,
-                            "step": step
-                        }, step=step)
-                # (a) normal sample grid + timing
+                    # (a) normal sample grid + timing
                     t0 = time.perf_counter()
                     samples = sampler.sample(cfg["diffusion"]["sample_n"])
                     t1 = time.perf_counter()
@@ -376,7 +360,6 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
                     save_image(samples, path, nrow=8)
                     dt = max(t1 - t0, 1e-6)
                     imgs_per_sec = cfg["diffusion"]["sample_n"] / dt
-
                     if run:
                         wandb.log({
                             "samples_grid": wandb.Image(path),
@@ -385,40 +368,69 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
                             "step": step
                         }, step=step)
 
-                # (b) reverse trajectory video (xt over denoising)
-                    if cfg.get("viz", {}).get("enable_reverse_traj", False) \
-                       and step % int(cfg["viz"]["reverse_every_steps"]) == 0:
-                        B = int(cfg["viz"]["reverse_batch_n"])
-                        C = diffusion.channels
-                        H = W = cfg["data"]["image_size"]
-                        # always use DDPM trajectory here; if you want DDIM, implement a similar function
-                        _, frames_xt, _ = sampler.ddpm_sample_trajectory(
-                            shape=(B, C, H, W),
-                            record_every=int(
-                                cfg["viz"]["reverse_record_every"]),
-                            return_x0=False
-                        )
-                        video = frames_to_wandb_video(
-                            frames_xt, nrow=min(8, B), fps=int(cfg["viz"]["video_fps"]))
-                        if run:
-                            wandb.log({"viz/reverse_xt": video,
-                                      "step": step}, step=step)
+                    # ===== NEW: two separate videos =====
 
-                    # (c) forward noising trajectory (q(x_t|x0))
-                    if cfg.get("viz", {}).get("enable_forward_traj", False) \
-                       and step % int(cfg["viz"]["forward_every_steps"]) == 0:
-                        # take a small batch from the current batch `x`
-                        Bf = int(cfg["viz"]["forward_batch_n"])
-                        # x is in [0,1] from dataloader
-                        x0_vis = x[:Bf].detach().cpu()
-                        t_vals = cfg["viz"]["forward_t_values"]  # list of ints
-                        frames_fwd = diffusion.forward_noising_trajectory(
-                            x0=x0_vis.to(device), t_values=t_vals
-                        )
+                    # Common config
+                    fps = int(cfg["viz"].get("video_fps", 16))
+
+                    # ---------- (1) FORWARD VIDEO: x0 -> xT ----------
+                    if cfg.get("viz", {}).get("enable_forward_traj", True) \
+                       and step % int(cfg["viz"].get("forward_every_steps", 4000)) == 0:
+
+                        Bf = int(cfg["viz"].get("forward_batch_n", 16))
+                        x0_vis = x[:Bf].detach().to(device)   # [0,1]
+
+                        # derive t-values: use list in config if provided; else build by stride
+                        T = sampler.num_timesteps
+                        if "forward_t_values" in cfg.get("viz", {}):
+                            t_vals = list(cfg["viz"]["forward_t_values"])
+                            # safety: clip to [0, T-1] and ensure T-1 is included
+                            t_vals = [int(max(0, min(T-1, t))) for t in t_vals]
+                            if (T-1) not in t_vals:
+                                t_vals.append(T-1)
+                        else:
+                            stride = int(cfg["viz"].get(
+                                "forward_record_every", 5))
+                            t_vals = list(range(0, T, stride)) + [T-1]
+
+                        frames_fwd = sampler.forward_noising_trajectory(
+                            x0=x0_vis, t_values=t_vals)
                         video_fwd = frames_to_wandb_video(
-                            frames_fwd, nrow=min(8, Bf), fps=int(cfg["viz"]["video_fps"]))
+                            frames_fwd, nrow=min(8, Bf), fps=fps)
                         if run:
                             wandb.log({"viz/forward_xt": video_fwd,
+                                      "step": step}, step=step)
+
+                        # Build x_T from the SAME x0_vis for the reverse video
+                        tt_T = torch.full((x0_vis.size(0),),
+                                          T-1, device=device, dtype=torch.long)
+                        x_T = sampler.q_sample(
+                            sampler.normalize(x0_vis), tt_T)  # [-1,1]
+                    else:
+                        x_T = None  # may be filled below if only reverse is enabled
+
+                    # ---------- (2) REVERSE VIDEO: xT -> x0 ----------
+                    if cfg.get("viz", {}).get("enable_reverse_traj", True) \
+                       and step % int(cfg["viz"].get("reverse_every_steps", 4000)) == 0:
+
+                        Br = int(cfg["viz"].get("reverse_batch_n", 16))
+                        # If we didn't run forward video this step, prepare x_T now from current batch:
+                        if x_T is None:
+                            x0_vis = x[:Br].detach().to(device)  # [0,1]
+                            T = sampler.num_timesteps
+                            tt_T = torch.full(
+                                (x0_vis.size(0),), T-1, device=device, dtype=torch.long)
+                            x_T = sampler.q_sample(
+                                sampler.normalize(x0_vis), tt_T)  # [-1,1]
+
+                        rec_rev = int(cfg["viz"].get(
+                            "reverse_record_every", 5))
+                        frames_rev = sampler.reverse_from_xt_trajectory(
+                            x_t=x_T[:Br], t_start=T-1, record_every=rec_rev)
+                        video_rev = frames_to_wandb_video(
+                            frames_rev, nrow=min(8, Br), fps=fps)
+                        if run:
+                            wandb.log({"viz/reverse_xt": video_rev,
                                       "step": step}, step=step)
 
                 diffusion.train()

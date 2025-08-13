@@ -74,24 +74,22 @@ metrics:
   metric_batch_size: 32
 
 
-diffusion:
-  T: 400
-  beta_schedule: cosine
-  objective: pred_noise
-  sampling_steps: 400   # DDPM
-  eta: 0.0
-  sample_every: 1000
-  sample_n: 64
 
 viz:
-  enable_reverse_traj: true
-  reverse_every_steps: 4000      # log video thưa để nhẹ
-  reverse_record_every: 5        # ↓ số này => ghi nhiều snapshot hơn (1 = mượt nhất)
-  reverse_batch_n: 16
+  # Forward trajectory video (x0 -> xT)
   enable_forward_traj: true
   forward_every_steps: 4000
-  forward_t_values: [0, 20, 40, 60, 80, 120, 160, 240, 320, 399]  # dày hơn chút
   forward_batch_n: 16
-  video_fps: 16                  # tăng FPS (16–24) cho playback mượt hơn
-   # fps cao hơn để mượt
+  # dùng 1 trong 2 cách bên dưới:
+  # Cách A: theo stride
+  forward_record_every: 5
+  # Cách B: chỉ định t-values thủ công (ưu tiên nếu có)
+  # forward_t_values: [0, 10, 20, 40, 80, 160, 320, 399]
 
+  # Reverse trajectory video (xT -> x0)
+  enable_reverse_traj: true
+  reverse_every_steps: 4000         # nên bằng forward_every_steps để làm “cặp đôi”
+  reverse_batch_n: 16
+  reverse_record_every: 5
+
+  video_fps: 16
