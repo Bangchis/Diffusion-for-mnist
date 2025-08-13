@@ -1,0 +1,11 @@
+tqdm==4.66.4
+wandb==0.17.0
+PyYAML==6.0.2
+einops==0.8.0
+torchvision==0.18.1
+ema-pytorch==0.2.3
+# If torch is missing, install the proper CUDA wheel separately, e.g.:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+clean-fid 
+torch-fidelity

@@ -1,0 +1,40 @@
+# Python bytecode và cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Data và checkpoint
+data/
+checkpoints/
+samples/
+wandb/
+*.pt
+*.pth
+
+# Notebook checkpoint
+.ipynb_checkpoints/
+
+# File log và tạm
+*.log
+*.tmp
+*.temp
+
+
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Dependencies cài đặt cục bộ
+*.egg-info/
+dist/
+build/
+
+# VSCode settings
+.vscode/

@@ -1,0 +1,97 @@
+project: diffusion-from-scratch
+run_name: mnist32_small
+
+data:
+  dataset: mnist
+  image_size: 32        # resize MNIST 28 -> 32 (chia được cho UNet)
+  channels: 1
+  batch_size: 128
+  num_workers: 4
+
+opt:
+  lr: 0.0002
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+
+diffusion:
+  T: 400                # fewer steps for MNIST
+  beta_schedule: cosine
+  objective: pred_noise # start simple; later try pred_v
+  sampling_steps: 400    # < T => DDIM fast sampling
+  eta: 0.0
+  self_condition: false
+  clamp_x0: true
+  sample_every: 2000
+  sample_n: 64
+  learned_variance: false
+  var_loss_weight: 0.0
+  min_snr_loss_weight: false
+
+
+model:
+  dim: 32               # lightweight UNet
+  dim_mults: [1, 2, 4]  # shallow for MNIST
+  channels: 1
+  attn_heads: 2
+  attn_dim_head: 16
+  dropout: 0.0
+  self_condition: false
+  learned_variance: false
+  outer_attn: false     # turn off outer attention; keep only bottleneck attention
+
+train:
+  max_steps: 30000
+  log_every: 200
+  ckpt_dir: ./checkpoints
+  grad_accum: 1
+
+ema:
+  enabled: false
+  decay: 0.995
+  update_every: 10
+
+wandb:
+  enabled: true
+  mode: online
+  api_key_env:  b66dc9962d08bb26ff3fc4928703a13b30b2e9c9
+  tags: [mnist, small, bottleneck-attn]
+
+compute:
+  enable_tf32: true
+
+
+metrics:
+  # norms
+  global_norm_every: 1000
+
+
+  # FID / IS (optional; need clean-fid and torch-fidelity installed)
+  enable_fid: true
+  enable_is: true
+  fid_every: 4000
+  is_every: 4000
+  metric_num_gen: 5000
+  metric_batch_size: 32
+
+
+diffusion:
+  T: 400
+  beta_schedule: cosine
+  objective: pred_noise
+  sampling_steps: 400   # DDPM
+  eta: 0.0
+  sample_every: 1000
+  sample_n: 64
+
+viz:
+  enable_reverse_traj: true
+  reverse_every_steps: 4000      # log video thưa để nhẹ
+  reverse_record_every: 5        # ↓ số này => ghi nhiều snapshot hơn (1 = mượt nhất)
+  reverse_batch_n: 16
+  enable_forward_traj: true
+  forward_every_steps: 4000
+  forward_t_values: [0, 20, 40, 60, 80, 120, 160, 240, 320, 399]  # dày hơn chút
+  forward_batch_n: 16
+  video_fps: 16                  # tăng FPS (16–24) cho playback mượt hơn
+   # fps cao hơn để mượt
+
