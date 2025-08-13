@@ -17,7 +17,7 @@ from torch.optim import Adam
 from tqdm.auto import tqdm
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
-from ema_pytorch import EMA
+
 import wandb
 import numpy as np
 from torchvision.utils import make_grid
@@ -46,20 +46,29 @@ from diffusion import GaussianDiffusion  # your current file name
 
 def frames_to_wandb_video(frames, nrow=8, fps=6):
     """
-    Convert a list of [B,C,H,W] tensors (values in [0,1]) into a W&B Video.
-    - For each time step: make a grid of the batch (nrow), convert to HxWxC uint8.
-    - Stack along time to build a (T,H,W,C) numpy array.
+    frames: list of [B,C,H,W] in [0,1]
+    Return: wandb.Video with frames stacked as [T,H,W,3] uint8
     """
+    import numpy as np
+    from torchvision.utils import make_grid
+    import wandb
+
     np_frames = []
     for f in frames:
-        # clamp and make a grid
         f = f.clamp(0, 1)
-        grid = make_grid(f, nrow=nrow)  # [C,H,W]
-        grid = (grid * 255.0).byte().cpu().numpy()     # [C,H,W], uint8
-        grid = np.transpose(grid, (1, 2, 0))           # [H,W,C]
+        grid = make_grid(f, nrow=nrow)            # [C,H,W], C can be 1 or 3
+
+        # --- ensure 3 channels for video encoders / W&B ---
+        if grid.shape[0] == 1:                    # grayscale -> RGB
+            grid = grid.repeat(3, 1, 1)           # [3,H,W]
+
+        grid = (grid * 255.0).clamp(0, 255).byte().cpu().contiguous().numpy()  # [3,H,W] uint8
+        grid = np.transpose(grid, (1, 2, 0))      # [H,W,3]
         np_frames.append(grid)
-    video = np.stack(np_frames, axis=0)  # [T,H,W,C]
+
+    video = np.stack(np_frames, axis=0)           # [T,H,W,3]
     return wandb.Video(video, fps=fps, format="mp4")
+
 # ---------------------------
 # Speedups on CUDA (still FP32)
 # ---------------------------

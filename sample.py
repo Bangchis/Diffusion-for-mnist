@@ -9,7 +9,6 @@ import os
 import yaml
 import torch
 from torchvision.utils import save_image
-from ema_pytorch import EMA
 
 from unet import UNet
 from diffusion import GaussianDiffusion

@@ -1,26 +1,13 @@
-# Use PyTorch CUDA 12.1 wheels for torch/torchvision
---index-url https://download.pytorch.org/whl/cu121
 torch
 torchvision
-
-# Core utils
-pyyaml
 tqdm
 numpy
 Pillow
-einops
-
-
-# Logging & videos
 wandb
 imageio
-imageio-ffmpeg  # để ghi MP4 mà không cần ffmpeg hệ thống
-
-# Metrics (nếu bật FID/IS)
+imageio-ffmpeg 
 clean-fid
 torch-fidelity
-
-# (Tùy chọn) Đẩy model lên Hugging Face
 huggingface_hub
-
-#/usr/bin/python3 train_mnist.py --config config_mnist_small.yaml
+einops
+wandb[media]
