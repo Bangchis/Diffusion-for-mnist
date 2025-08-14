@@ -1,4 +1,4 @@
-project: diffusion-from-scratch-3
+project: diffusion-from-scratch-6
 run_name: mnist32_small
 
 data:

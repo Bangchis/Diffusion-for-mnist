@@ -16,6 +16,8 @@ samples/
 wandb/
 *.pt
 *.pth
+metrics_gen/
+metrics_ref/
 
 # Notebook checkpoint
 .ipynb_checkpoints/
