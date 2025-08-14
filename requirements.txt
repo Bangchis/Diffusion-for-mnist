@@ -11,3 +11,5 @@ torch-fidelity
 huggingface_hub
 einops
 wandb[media]
+moviepy 
+imageio
