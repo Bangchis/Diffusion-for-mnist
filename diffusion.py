@@ -406,91 +406,41 @@ class GaussianDiffusion(nn.Module):
 
         return self.unnormalize(img), frames_xt, frames_x0
 
-    @torch.no_grad()
-    def forward_noising_trajectory(self, x0, t_values, *, return_xt_last=False):
+    # In class GaussianDiffusion (diffusion.py)
+
+    @torch.inference_mode()
+    def forward_noising_trajectory(self, x0, t_values):
         """
-        Create a forward (noising) trajectory for visualization: x0 -> ... -> x_T.
-
-        Args:
-            x0 (Tensor): clean images in [0,1], shape [B,C,H,W] (from DataLoader).
-            t_values (Iterable[int]): list of discrete times (0..T-1) you want to record.
-                                    Example: [0, 10, 20, 40, 80, 160, 320, 399]
-            return_xt_last (bool): if True, also returns the exact x_T used for the
-                                last time in t_values (in [-1,1]), so you can feed
-                                it to reverse_from_xt_trajectory for a perfectly
-                                matched reverse video.
-
-        Returns:
-            frames (List[Tensor]): each element is [B,C,H,W] in [0,1]
-            (optional) xt_last (Tensor): the last noisy batch in [-1,1], shape [B,C,H,W]
-                                        ONLY if return_xt_last=True
+        Build a forward trajectory x0 -> x_t for the given t_values.
+        x0 is expected in [0,1]. Internally normalize to [-1,1] to q_sample,
+        then unnormalize each frame back to [0,1] for visualization.
+        Returns: list of tensors [B,C,H,W] in [0,1], ordered by t_values.
         """
-        # ---- 1) Validate inputs ----
-        assert x0.ndim == 4, f"x0 must be [B,C,H,W], got {x0.shape}"
-        B, C, H, W = x0.shape
-        assert C == self.channels, f"channel mismatch: x0 has {C}, model has {self.channels}"
-        T = self.num_timesteps
-
-        # sanitize t_values: ints, clipped to [0, T-1], unique & sorted (increasing noise)
-        t_list = sorted({int(max(0, min(T - 1, int(t)))) for t in t_values})
-        if len(t_list) == 0:
-            return [] if not return_xt_last else ([], None)
-
-        # ---- 2) Move & normalize once ----
-        x0 = x0.to(device=self.device, dtype=next(
-            self.model.parameters()).dtype)
-        x0n = self.normalize(x0)  # [0,1] -> [-1,1]
-
-        # ---- 3) Use ONE fixed epsilon for the whole batch so the path is smooth ----
-        # This makes frames for different t lie on the same noise direction,
-        # i.e., xt = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*epsilon
-        eps = torch.randn_like(x0n)
-
+        assert x0.dim() == 4, "x0 must be [B,C,H,W]"
+        device = x0.device
+        x0_n = self.normalize(x0)
         frames = []
-        xt_last = None
-
-        # ---- 4) Produce frames at requested times ----
-        for t in t_list:
-            tt = torch.full((B,), t, device=self.device, dtype=torch.long)
-
-            # equivalent to: xt = sqrt(alpha_bar_t)*x0n + sqrt(1-alpha_bar_t)*eps
-            # using the SAME eps for all t (smooth trajectory)
-            xt = (
-                self.sqrt_alphas_cumprod.index_select(0, tt)
-                .reshape(B, 1, 1, 1) * x0n
-                +
-                self.sqrt_one_minus_alphas_cumprod.index_select(0, tt)
-                .reshape(B, 1, 1, 1) * eps
-            )
-
-            # store a viewable frame in [0,1]
-            frames.append(self.unnormalize(xt.clamp(-1, 1)))
-
-            xt_last = xt  # keep the last noisy batch we produced
-
-        # ---- 5) Return frames (and optionally the exact last xt in [-1,1]) ----
-        if return_xt_last:
-            return frames, xt_last
+        for t in t_values:
+            tt = torch.full((x0.size(0),), int(
+                t), device=device, dtype=torch.long)
+            x_t = self.q_sample(x0_n, tt)          # in [-1,1]
+            frames.append(self.unnormalize(x_t))   # back to [0,1]
         return frames
 
     @torch.inference_mode()
-    def reverse_from_xt_trajectory(self, x_t, t_start=None, record_every=50):
-        if t_start is None:
-            t_start = self.num_timesteps - 1
-
-        img = x_t.clone()            # x_t ở miền [-1,1]
-        frames = []
+    def reverse_from_xt_trajectory(self, x_t, t_start: int, record_every: int = 10):
+        """
+        Run a DDPM reverse chain starting from a given noisy state x_t at t=t_start.
+        x_t must be in [-1,1]. We record every `record_every` steps (and the last one).
+        Returns: list of tensors [B,C,H,W] in [0,1], ordered from noisy -> clean.
+        """
+        assert x_t.dim() == 4, "x_t must be [B,C,H,W]"
+        img = x_t.clone()
+        frames = [self.unnormalize(img)]
         x0 = None
-
-        for t in reversed(range(t_start + 1)):  # t_start, ..., 0
-            # Ghi lại x_t hiện tại (chưa bước) để thấy diễn tiến mượt
-            if t == t_start or t == 0 or (t % record_every) == 0:
-                frames.append(self.unnormalize(
-                    img.clamp(-1, 1)))  # [0,1] để xem
-
+        for t in range(t_start, -1, -1):
             self_cond = x0 if self.self_condition else None
-            img, x0 = self.p_sample(img, t, self_cond)  # 1 bước DDPM
-
-        # Đảm bảo khung cuối là x_0
-        frames.append(self.unnormalize(img.clamp(-1, 1)))
+            img, x0 = self.p_sample(img, t, self_cond)  # img in [-1,1]
+            if (t % record_every) == 0 or t == 0:
+                frames.append(self.unnormalize(img))    # [0,1]
         return frames

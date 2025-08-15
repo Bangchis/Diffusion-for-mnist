@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # train_mnist.py
 # ---------------------------------------------------------------------
 # FP32 training for MNIST with:
@@ -7,6 +8,17 @@
 # - Optional FID (clean-fid) and IS (torch-fidelity)
 # - Logs diffusion hyperparameters (T, beta schedule, sampling steps, eta)
 # ---------------------------------------------------------------------
+
+"""
+This script implements a full training loop for a diffusion model on
+MNIST.  It includes numerous metrics, sampling hooks and logging to
+Weights & Biases (W&B).  In addition to the stock features, this
+version encodes all visualization videos locally to MP4 via ffmpeg
+before sending them to W&B.  Encoding locally avoids a bug in W&B's
+automatic video conversion that sometimes misdetects channel layouts
+and produces garbled green/blue stripe artifacts.  See the README or
+accompanying documentation for further details.
+"""
 
 import os
 import time
@@ -21,7 +33,6 @@ from torchvision.utils import save_image
 import wandb
 import numpy as np
 from torchvision.utils import make_grid
-
 
 # Optional metrics: will be checked at runtime
 try:
@@ -44,30 +55,71 @@ from diffusion import GaussianDiffusion  # your current file name
 # ---------------------------
 
 
-def frames_to_wandb_video(frames, nrow=8, fps=6):
+def frames_to_numpy_sequence(frames, nrow: int = 8):
     """
-    frames: list of [B,C,H,W] in [0,1]
-    Return: wandb.Video with frames stacked as [T,H,W,3] uint8
-    """
-    import numpy as np
-    from torchvision.utils import make_grid
-    import wandb
+    Convert a list of frames (each of shape [B,C,H,W] in the range [0,1])
+    into a list of H×W×3 uint8 numpy arrays suitable for video encoding.
 
-    np_frames = []
+    Each time step is first tiled into a grid using `make_grid` with
+    `nrow` images per row.  Grayscale inputs are automatically
+    expanded to three channels for compatibility with most video
+    encoders.  This helper mirrors the logic of the original
+    `frames_to_wandb_video` but returns a Python list rather than
+    immediately creating a W&B Video.
+
+    Args:
+        frames: List of tensors with shape [B, C, H, W] and values in [0,1].
+        nrow: Number of samples per row in the grid.
+
+    Returns:
+        List of numpy arrays with dtype uint8 and shape [H, W, 3].
+    """
+    seq = []
     for f in frames:
+        # Clamp to [0,1] and tile into a grid of shape [C,H,W].
         f = f.clamp(0, 1)
-        grid = make_grid(f, nrow=nrow)            # [C,H,W], C can be 1 or 3
+        grid = make_grid(f, nrow=nrow)
+        # Ensure we have three channels (MNIST is 1-channel).
+        if grid.shape[0] == 1:
+            grid = grid.repeat(3, 1, 1)
+        # Convert to uint8 numpy array.
+        frame = (grid * 255.0).round().byte().cpu().numpy()
+        frame = np.transpose(frame, (1, 2, 0))  # [H,W,3]
+        # Make contiguous to avoid stride issues when writing video.
+        frame = np.ascontiguousarray(frame)
+        seq.append(frame)
+    return seq
 
-        # --- ensure 3 channels for video encoders / W&B ---
-        if grid.shape[0] == 1:                    # grayscale -> RGB
-            grid = grid.repeat(3, 1, 1)           # [3,H,W]
 
-        grid = (grid * 255.0).clamp(0, 255).byte().cpu().contiguous().numpy()  # [3,H,W] uint8
-        grid = np.transpose(grid, (1, 2, 0))      # [H,W,3]
-        np_frames.append(grid)
+def save_video_local(frames, out_path: str, fps: int = 16, nrow: int = 8):
+    """
+    Encode a sequence of frames into an MP4 file using ffmpeg via
+    imageio.  The frames argument is a list of tensors with shape
+    [B,C,H,W] in the range [0,1].  Each frame is converted to an
+    H×W×3 uint8 numpy array using `frames_to_numpy_sequence`.
 
-    video = np.stack(np_frames, axis=0)           # [T,H,W,3]
-    return wandb.Video(video, fps=fps, format="mp4")
+    Args:
+        frames: List of tensors of shape [B,C,H,W] with values in [0,1].
+        out_path: Destination path for the MP4 file.  Parent
+            directories will be created if necessary.
+        fps: Frames per second for the video.
+        nrow: Number of samples per row in the tiled grid.
+
+    Returns:
+        The path to the saved video (same as `out_path`).
+    """
+    import imageio
+    # Ensure parent directory exists.
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    seq = frames_to_numpy_sequence(frames, nrow=nrow)
+    # Choose libx264 codec to avoid forced downscaling; set macro_block_size
+    # to None so imageio does not resize frames to a multiple of 16.
+    writer = imageio.get_writer(out_path, fps=fps, codec='libx264',
+                                quality=8, macro_block_size=None)
+    for fr in seq:
+        writer.append_data(fr)
+    writer.close()
+    return out_path
 
 # ---------------------------
 # Speedups on CUDA (still FP32)
@@ -115,10 +167,11 @@ def log_global_grad_norm_sparsely(model, step, every=1000):
         global_norm = float(torch.tensor(norms).norm().item())
     wandb.log({"train/global_grad_norm": global_norm, "step": step}, step=step)
 
-
 # ---------------------------
 # Prepare a real-image reference folder for FID (folder-vs-folder)
 # ---------------------------
+
+
 def ensure_real_ref_folder(dl, out_dir, max_images=50000, img_size=32, force_rgb=False):
     """
     Exports up to `max_images` real images from the dataloader to `out_dir`
@@ -175,30 +228,42 @@ def generate_images_to_folder(model, n_images=5000, batch_size=64, out_dir="./ge
 # ---------------------------
 
 
-def compute_fid_cleanfid(gen_dir, real_dir):
+def compute_fid_cleanfid(gen_dir, real_dir, device="cpu", bs=64, workers=4):
+    """
+    Tính FID bằng clean-fid trên CPU để tránh CUDA illegal memory access.
+    """
     if not HAS_CLEANFID:
         print("[metrics] clean-fid not installed; skip FID.")
         return None
     try:
-        score = clean_fid.compute_fid(gen_dir, real_dir)
+        score = clean_fid.compute_fid(
+            gen_dir,              # folder ảnh sinh
+            real_dir,             # folder ảnh tham chiếu
+            device=device,        # <— ép "cpu"
+            batch_size=bs,
+            num_workers=workers
+        )
         return float(score)
     except Exception as e:
         print("[metrics] clean-fid error:", e)
         return None
 
 
-def compute_inception_score_torchfidelity(gen_dir, cuda=True):
+def compute_inception_score_torchfidelity(gen_dir, cuda=False):
+    """
+    Tính Inception Score bằng torch-fidelity trên CPU mặc định để an toàn.
+    """
     if not HAS_TORCH_FIDELITY:
         print("[metrics] torch-fidelity not installed; skip IS.")
         return None, None
     try:
         metrics = tf_calculate_metrics(
             input1=gen_dir,
-            cuda=cuda and torch.cuda.is_available(),
+            cuda=cuda and torch.cuda.is_available(),  # mặc định False
             isc=True, fid=False, kid=False, prc=False
         )
-        # returns mean and std
-        return float(metrics.get("inception_score_mean", float("nan"))), float(metrics.get("inception_score_std", float("nan")))
+        return float(metrics.get("inception_score_mean", float("nan"))), \
+            float(metrics.get("inception_score_std",  float("nan")))
     except Exception as e:
         print("[metrics] torch-fidelity error:", e)
         return None, None
@@ -215,6 +280,8 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
     cfg = yaml.safe_load(open(cfg_path))
     os.makedirs(cfg["train"]["ckpt_dir"], exist_ok=True)
     os.makedirs("./samples", exist_ok=True)
+    # Ensure video directory exists early to avoid race conditions
+    os.makedirs("./videos", exist_ok=True)
     maybe_enable_cuda_speedups(cfg)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -404,11 +471,14 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
 
                         frames_fwd = sampler.forward_noising_trajectory(
                             x0=x0_vis, t_values=t_vals)
-                        video_fwd = frames_to_wandb_video(
-                            frames_fwd, nrow=min(8, Bf), fps=fps)
+
+                        # save locally (MP4)
+                        fwd_path = f"./videos/forward_step_{step}.mp4"
+                        save_video_local(frames_fwd, fwd_path,
+                                         fps=fps, nrow=min(8, Bf))
                         if run:
-                            wandb.log({"viz/forward_xt": video_fwd,
-                                      "step": step}, step=step)
+                            wandb.log(
+                                {"viz/forward_xt": wandb.Video(fwd_path)}, step=step)
 
                         # Build x_T from the SAME x0_vis for the reverse video
                         tt_T = torch.full((x0_vis.size(0),),
@@ -436,11 +506,14 @@ def main(cfg_path="config_mnist_small.yaml", seed=42):
                             "reverse_record_every", 5))
                         frames_rev = sampler.reverse_from_xt_trajectory(
                             x_t=x_T[:Br], t_start=T-1, record_every=rec_rev)
-                        video_rev = frames_to_wandb_video(
-                            frames_rev, nrow=min(8, Br), fps=fps)
+
+                        # save locally (MP4)
+                        rev_path = f"./videos/reverse_step_{step}.mp4"
+                        save_video_local(frames_rev, rev_path,
+                                         fps=fps, nrow=min(8, Br))
                         if run:
-                            wandb.log({"viz/reverse_xt": video_rev,
-                                      "step": step}, step=step)
+                            wandb.log(
+                                {"viz/reverse_xt": wandb.Video(rev_path)}, step=step)
 
                 diffusion.train()
 
